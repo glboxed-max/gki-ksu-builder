@@ -84,6 +84,9 @@ python -m kbx list-refs
 
 GitHub Actions：`Actions → Build → Run workflow`，填 Android/Kernel/Sub-level 与功能开关即可。
 
+> 📘 **想自己改工作流？** 看 [docs/WORKFLOW_GUIDE.md](docs/WORKFLOW_GUIDE.md)：
+> GitHub Actions 入门、YAML 的四个常见坑、本地验证方法，以及"在本仓库里加功能/加内核线"的配方。
+
 ## 产物
 
 | 产物 | 说明 |

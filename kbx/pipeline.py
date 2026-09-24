@@ -11,6 +11,7 @@ import logging
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,8 +21,30 @@ from .inputs import BuildInputs, PlanStep
 from .manager import PairingReport, pairing
 from .packaging import build_anykernel, build_boot_image, write_manifest
 
-AOSP_KERNEL = "https://android.googlesource.com/kernel/common"
+#: 内核源码：主源 + 镜像回退（googlesource 偶尔 502，必须有备选）
+KERNEL_MIRRORS = (
+    "https://android.googlesource.com/kernel/common",
+    "https://github.com/aosp-mirror/kernel_common.git",
+)
 log = logging.getLogger("kbx")
+
+
+def retry(fn, attempts: int = 3, base_delay: float = 5.0, what: str = "操作"):
+    """带退避的重试。用于一切网络操作（克隆/拉取）——CI 里服务器抽风很常见。
+
+    纯逻辑，可单测：最后一次仍失败时抛出最后一次的异常。
+    """
+    last: Exception | None = None
+    for i in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - 网络层什么都可能抛
+            last = exc
+            log.warning("%s 第 %d/%d 次失败: %s", what, i, attempts, exc)
+            if i < attempts:
+                time.sleep(base_delay * i)  # 5s, 10s ...
+    assert last is not None
+    raise last
 
 
 def pick_tag(prefix: str, ls_remote: str) -> str | None:
@@ -132,8 +155,11 @@ def plan(inputs: BuildInputs) -> Plan:
     steps.append(
         PlanStep(
             "拉取内核源码",
-            detail=f"{AOSP_KERNEL} @ {inputs.line.aosp_branch}",
-            actions=[f"检出 sub-level {inputs.sub_level} 对应提交（找不到则用分支 HEAD）"],
+            detail=f"{KERNEL_MIRRORS[0]} @ {inputs.line.aosp_branch}",
+            actions=[
+                f"检出 sub-level {inputs.sub_level} 对应提交（找不到则用分支 HEAD）",
+                f"失败时按顺序回退镜像：{' → '.join(KERNEL_MIRRORS[1:]) or '（无）'}，并带重试",
+            ],
         )
     )
     steps.append(
@@ -224,23 +250,63 @@ def build(inputs: BuildInputs, out_dir: Path, *, dry_run: bool = False) -> dict:
         return proc.stdout or ""
 
     # 1) 内核源码（sub-level -> tag 的解析放 Python 里做，不再用 shell 通配）
-    if not src.exists():
-        sh(f"git clone --depth 1 -b {inputs.line.aosp_branch} {AOSP_KERNEL} {src}")
+    if not src.exists() and not dry_run:
+        used = None
+        for mirror in KERNEL_MIRRORS:
+            try:
+                retry(
+                    lambda m=mirror: subprocess.run(
+                        f"git clone --depth 1 -b {inputs.line.aosp_branch} {m} {src}",
+                        shell=True,
+                        check=True,
+                        cwd=None,
+                    ),
+                    attempts=2,
+                    what=f"克隆内核源码({mirror})",
+                )
+                used = mirror
+                break
+            except Exception as exc:  # noqa: BLE001
+                log.warning("镜像不可用 %s: %s", mirror, exc)
+                shutil.rmtree(src, ignore_errors=True)
+        if not used:
+            raise RuntimeError("所有内核源码镜像都失败了，稍后重试（CI 上多为 googlesource 临时 502）")
+        manifest["kernel_source"] = used
+    elif dry_run:
+        sh(f"git clone --depth 1 -b {inputs.line.aosp_branch} {KERNEL_MIRRORS[0]} {src}")
+
     if inputs.sub_level.upper() != "X":
         prefix = f"{inputs.line.aosp_branch}.{inputs.sub_level}"
-        tag = pick_tag(prefix, capture(f"git -C {src} ls-remote --tags origin '{prefix}*'"))
-        if tag:
-            sh(f"git -C {src} fetch --depth 1 origin refs/tags/{tag}")
-            sh(f"git -C {src} checkout -q FETCH_HEAD")
-        else:
-            log.warning("没找到子版本 %s 的 tag（%s*），沿用 %s 分支 HEAD", inputs.sub_level, prefix, inputs.line.aosp_branch)
+        # 网络抖动不该让整个构建失败：tag 拉不到就退回分支 HEAD
+        try:
+            tag = pick_tag(prefix, capture(f"git -C {src} ls-remote --tags origin '{prefix}*'"))
+            if tag:
+                retry(lambda: subprocess.run(
+                    f"git -C {src} fetch --depth 1 origin refs/tags/{tag}",
+                    shell=True, check=True), what=f"拉取 tag {tag}")
+                sh(f"git -C {src} checkout -q FETCH_HEAD")
+            else:
+                log.warning("没找到子版本 %s 的 tag（%s*），沿用分支 HEAD", inputs.sub_level, prefix)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("子版本 tag 处理失败（%s），沿用 %s 分支 HEAD", exc, inputs.line.aosp_branch)
 
     # 2) KernelSU —— 严格按钉住版本的官方文档执行：
     #    「在内核源码的根目录下执行 kernel/setup.sh <分支或提交>」
     #    脚本自己负责把 KernelSU 克隆进内核树、并改写 drivers/Kconfig 与 Makefile。
     #    我们不做文档之外的额外改动（不改驱动版本号、不给 ksud 打补丁）。
     ksu = src / "KernelSU"
-    if not ksu.exists():
+    if not ksu.exists() and not dry_run:
+        retry(
+            lambda: subprocess.run(f"git clone {inputs.pin.repo_url} {ksu}", shell=True, check=True),
+            what="克隆 KernelSU",
+        )
+        retry(
+            lambda: subprocess.run(
+                f"git -C {ksu} checkout -q {inputs.pin.ref}", shell=True, check=True
+            ),
+            what="检出 KernelSU 提交",
+        )
+    elif dry_run:
         sh(f"git clone {inputs.pin.repo_url} {ksu}")
         sh(f"git -C {ksu} checkout -q {inputs.pin.ref}")
     setup = (ksu / "kernel" / "setup.sh").resolve()
@@ -305,12 +371,22 @@ def build(inputs: BuildInputs, out_dir: Path, *, dry_run: bool = False) -> dict:
 # 真实 IO 实现（build 用）
 # --------------------------------------------------------------------------- #
 def _real_clone(work: Path):
+    """功能模块用的克隆器：同样带重试（CI 上网络抖动不该毁掉整个构建）。"""
+
     def clone(repo: str, ref: str | None, name: str) -> Path:
         dest = work / name
         if not dest.exists():
-            subprocess.run(f"git clone {repo} {dest}", shell=True, check=True)
+            retry(
+                lambda: subprocess.run(f"git clone {repo} {dest}", shell=True, check=True),
+                what=f"克隆 {name}",
+            )
             if ref:
-                subprocess.run(f"git -C {dest} checkout -q {ref}", shell=True, check=True)
+                retry(
+                    lambda: subprocess.run(
+                        f"git -C {dest} checkout -q {ref}", shell=True, check=True
+                    ),
+                    what=f"检出 {name}",
+                )
         return dest
 
     return clone
