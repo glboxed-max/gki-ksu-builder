@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from .refs import KSUD_UAPI_PATCH_MARKER, KsuPin
 
 KSUD_FILE = Path("userspace/ksud/src/ksucalls.rs")
 
-_ORIGINAL = """pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
+KSUD_ORIGINAL = """pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
     let kernel_uapi = get_info().uapi_version;
     let userspace_uapi = uapi_version();
     if kernel_uapi != userspace_uapi {
@@ -32,7 +33,7 @@ _ORIGINAL = """pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
 }
 """
 
-_PATCHED = f"""pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {{
+KSUD_PATCHED = f"""pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {{
     let kernel_uapi = get_info().uapi_version;
     let userspace_uapi = uapi_version();
     if kernel_uapi == 0 {{
@@ -90,49 +91,58 @@ def pairing(pin: KsuPin) -> PairingReport:
     )
 
 
-def patch_ksud(src_root: Path) -> bool:
-    """给 ksud 源码打 uapi 兼容补丁。返回是否发生过修改。
+#: ksud 补丁的几种结果，写进 manifest，构建日志里也能一眼看到
+KSUD_PATCH_RESULTS = {
+    "patched": "已打补丁（原实现里存在 uapi 检查）",
+    "already": "源码里已带该兼容补丁",
+    "not-found": "该版本 ksud 里没有 uapi 检查（无需补丁）",
+}
 
-    * 已打过（含标记）-> 直接返回 False；
-    * 找不到目标函数 -> 抛错（宁可构建失败，也不要产出"看起来成功但管理器用不了"的内核）。
+
+def patch_ksud(src_root: Path) -> str:
+    """给 ksud 源码打 uapi 兼容补丁。
+
+    上游不同版本的 ksud 结构差别很大：
+    * 有的版本把实现放在 userspace/ksud/src/ksucalls.rs；
+    * 有的版本把实现拆到 ksucalls/ 下的多个文件里；
+    * 钉住的 3.x 版本干脆没有 uapi 检查（此时**不需要**补丁）。
+
+    因此这里递归查找目标函数，返回状态字符串（供 manifest 记录），
+    只有"找到了却改不动"才是真异常。
     """
-    target = src_root / KSUD_FILE
-    if not target.is_file():
-        raise FileNotFoundError(f"未找到 {target}（KSU 源码结构可能变化，需要更新 kbx/manager.py）")
-    text = target.read_text(encoding="utf-8")
-    if KSUD_UAPI_PATCH_MARKER in text:
-        return False
-    if _ORIGINAL not in text:
-        raise RuntimeError(
-            f"{target} 里没有找到 ensure_uapi_version_matched 的预期实现，"
-            "无法安全打补丁（上游可能已改动，请更新 kbx/manager.py 后再构建）"
-        )
-    target.write_text(text.replace(_ORIGINAL, _PATCHED), encoding="utf-8")
-    return True
+    roots = [src_root / KSUD_FILE]
+    ksud_dir = src_root / "userspace" / "ksud"
+    if ksud_dir.is_dir():
+        roots.extend(sorted(ksud_dir.rglob("*.rs")))
+
+    for target in roots:
+        if not target.is_file():
+            continue
+        text = target.read_text(encoding="utf-8", errors="ignore")
+        if KSUD_UAPI_PATCH_MARKER in text:
+            return "already"
+        if KSUD_ORIGINAL in text:
+            target.write_text(text.replace(KSUD_ORIGINAL, KSUD_PATCHED), encoding="utf-8")
+            return "patched"
+    return "not-found"
 
 
-def pin_driver_version(src_root: Path, version_code: int) -> bool:
-    """把内核侧驱动版本号固定为配套值（0 表示不改）。"""
+def pin_driver_version(src_root: Path, version_code: int) -> str:
+    """把内核侧驱动版本号固定为配套值（0 表示不改）。返回状态字符串。
+
+    同样递归查找：不同版本的宏定义位置不同（KernelSU.h / ksu.h / include/ 下等）。
+    """
     if not version_code:
-        return False
-    candidates = [
-        Path("kernel/KernelSU.h"),
-        Path("kernel/include/ksu.h"),
-        Path("kernel/ksu.h"),
-    ]
-    for rel in candidates:
-        f = src_root / rel
-        if f.is_file():
-            text = f.read_text(encoding="utf-8")
-            if "KERNEL_SU_VERSION" in text:
-                import re
-
-                new = re.sub(
-                    r"#define\s+KERNEL_SU_VERSION\s+\d+",
-                    f"#define KERNEL_SU_VERSION {version_code}",
-                    text,
-                )
-                if new != text:
-                    f.write_text(new, encoding="utf-8")
-                    return True
-    return False
+        return "skipped"
+    kernel_dir = src_root / "kernel"
+    search = kernel_dir.rglob("*.h") if kernel_dir.is_dir() else iter(())
+    for f in search:
+        text = f.read_text(encoding="utf-8", errors="ignore")
+        if "KERNEL_SU_VERSION" not in text:
+            continue
+        new = re.sub(r"(#define\s+KERNEL_SU_VERSION\s+)\d+", rf"\g<1>{version_code}", text)
+        if new != text:
+            f.write_text(new, encoding="utf-8")
+            return f"pinned:{f.relative_to(src_root)}"
+        return f"already:{f.relative_to(src_root)}"
+    return "not-found"

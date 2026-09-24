@@ -254,10 +254,18 @@ def build(inputs: BuildInputs, out_dir: Path, *, dry_run: bool = False) -> dict:
         sh(f"cat {(ksu / 'kernel' / 'Kconfig').resolve()} >> {src}/drivers/Kconfig || true")
     if not dry_run:
         # 版本号与 ksud 都在 KSU 源码树里，路径以 ksu 为根
-        pin_driver_version(ksu, inputs.pin.driver_version_code)
+        version_status = pin_driver_version(ksu, inputs.pin.driver_version_code)
+        manifest["driver_version_pin"] = version_status
+        log.info("驱动版本号: %s", version_status or "未找到宏定义")
         if inputs.pin.legacy_uapi:
-            patch_ksud(ksu)
-            manifest["ksud_patched"] = True
+            status = patch_ksud(ksu)
+            manifest["ksud_patch"] = status
+            log.info("ksud uapi 补丁: %s", status)
+            if status == "not-found":
+                log.warning(
+                    "该版本 ksud 未发现 uapi 版本检查，按“无需补丁”处理；"
+                    "若之后管理器报版本不匹配，再来检查 kbx/manager.py 的目标文件"
+                )
 
     # 3) 功能
     from .features import feature
