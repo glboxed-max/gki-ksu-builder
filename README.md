@@ -44,6 +44,30 @@ kbx/
 - **同代配对**：KSU 驱动、配套 `ksud`、管理器 APK 三者必须同来源提交，仓库在 `refs.py` 里维护这张表。
 - **可测试**：`tests/` 单测覆盖固定表完整性与闸门逻辑，本地秒级跑完，不依赖 GitHub。
 
+## 我们严格按"钉住版本自己的官方文档"来做
+
+构建流程的每一步都能在**所选版本自带的文档**里找到出处，不引入文档之外的做法。
+以 SukiSU v3.1.5（versionCode 13000，提交 `fa060dca…`）为例：
+
+| 步骤 | 官方文档出处 |
+|---|---|
+| 集成 KernelSU | `docs/README.md`「如何添加」：在**内核源码根目录**执行 `kernel/setup.sh <分支或提交>`（脚本自行克隆并改写 `drivers/Kconfig`、`drivers/Makefile`） |
+| SUSFS | `docs/README.md`：「使用 main 分支（**需要手动集成 susfs**）」→ 本仓库取**同代** susfs4ksu 提交，打内核侧 `50_add_susfs_in_*.patch` + KSU 侧 `10_enable_susfs_for_ksu.patch` |
+| KPM | `docs/README.md`「KPM 支持」：源码就在 `kernel/kpm/`，只需 `CONFIG_KPM=y`；GKI 2.0 默认钩子是 KPROBES，需要 `CONFIG_KPROBES=y` |
+| 管理器 | 与驱动**同代**的上游 APK，不改名、不重签（内核按证书信任管理器） |
+| 刷写 | AnyKernel3（官方文档推荐的 GKI 刷写方式） |
+
+### 明确**不做**的事（走过的弯路，留个记录）
+
+1. ❌ **不给 ksud 打「uapi 兼容」补丁**：官方文档里没有这一步。实测证明设备侧
+   "管理器报版本不匹配"的真因是**设备里残留了更高版本的 ksud**（旧 LKM 安装模式留下的），
+   正确做法是把旧管理器/ksud 卸干净，再装**同版本**管理器。
+2. ❌ **不改写驱动 `KERNEL_SU_VERSION`**：版本号用该版本源码自带的，不去"对号入座"。
+3. ❌ **不重命名 / 不重签管理器**：内核只承认一个管理器 App，重签会让它认不到。
+
+> 这些弯路对应的代码仍保留在 `kbx/manager.py`，但**默认不启用**、并标注为"排障参考"，
+> 以免以后重复踩坑（也有单测覆盖其行为）。
+
 ## 用法
 
 ```bash

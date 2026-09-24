@@ -80,7 +80,10 @@ class PlanTests(unittest.TestCase):
         # 管理器配对策略必须写明"不改名"
         self.assertFalse(p.pairing.rename_manager)
         self.assertEqual(p.pairing.manager_apk, "SukiSU-manager-13000.apk")
-        self.assertTrue(p.pairing.ksud_patch_needed)
+        # 必须声明按官方文档的集成方式，且不出现文档外的额外改动
+        self.assertIn("kernel/setup.sh", p.pairing.pin.docs_flow)
+        self.assertIn("不做文档之外的改动", text)
+        self.assertNotIn("uapi 兼容补丁", text)
         # 渲染内容包含关键提示
         self.assertIn("不改名、不重签", text)
         self.assertIn("os_version", text)

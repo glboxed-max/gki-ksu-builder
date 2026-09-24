@@ -18,12 +18,21 @@ class KpmFeature(Feature):
         return True, ""
 
     def describe(self, ctx: FeatureContext) -> list[str]:
+        # 依据：钉住版本官方文档 docs/README.md「KPM 支持」一节
+        #   - KPM 源码就在 KSU 源码树的 kernel/kpm/ 里，不需要额外打补丁
+        #   - 需要 CONFIG_KPM=y；GKI 默认钩子是 KPROBES，需要 CONFIG_KPROBES=y
         return [
-            "应用 SukiSU 的 KPM 内核侧改动（kernel/kpm）",
+            "确认 kernel/kpm/ 存在（KPM 源码随 KSU 源码一起拉取，无需额外补丁）",
             "注入 CONFIG_KPM=y",
-            "记录 KPM 为可失败项：构建失败时降级为警告而不是整体失败",
+            "注入 CONFIG_KPROBES=y（官方文档：GKI 2.0 默认钩子为 KPROBES）",
         ]
 
     def apply(self, ctx: FeatureContext) -> None:
+        kpm_dir = ctx.src_root / "KernelSU" / "kernel" / "kpm"
+        if kpm_dir.is_dir():
+            ctx.notes.append("KPM: kernel/kpm/ 存在（随 KSU 源码提供）")
+        else:
+            ctx.notes.append("KPM: 未找到 kernel/kpm/，请确认 KSU 版本是否包含 KPM")
         ctx.inject_config("CONFIG_KPM", True)
-        ctx.notes.append("KPM 已启用（失败时按警告处理，不阻断构建）")
+        ctx.inject_config("CONFIG_KPROBES", True)
+        ctx.notes.append("KPM 已启用（CONFIG_KPM + CONFIG_KPROBES）")

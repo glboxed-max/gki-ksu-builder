@@ -94,14 +94,18 @@ class PairingPolicyTests(unittest.TestCase):
     def test_never_renames_manager(self):
         report = pairing(ksu_pin("sukisu-13000"))
         self.assertFalse(report.rename_manager)
-        self.assertTrue(report.ksud_patch_needed)
         self.assertEqual(report.manager_apk, "SukiSU-manager-13000.apk")
         text = "\n".join(report.lines())
         self.assertIn("不改名、不重签", text)
+        # 必须体现"按官方文档集成"
+        self.assertIn("kernel/setup.sh", text)
+        # 设备侧提醒：先卸干净旧管理器，避免残留 ksud 造成版本不匹配
+        self.assertTrue(any("卸载" in n for n in report.device_notes))
 
-    def test_newer_ksu_does_not_need_patch(self):
-        report = pairing(ksu_pin("next-stable"))
-        self.assertFalse(report.ksud_patch_needed)
+    def test_report_does_not_mention_patching_ksud(self):
+        """官方文档没有这一步，报告里也不应出现。"""
+        text = "\n".join(pairing(ksu_pin("sukisu-13000")).lines())
+        self.assertNotIn("给 ksud", text)
 
 
 if __name__ == "__main__":

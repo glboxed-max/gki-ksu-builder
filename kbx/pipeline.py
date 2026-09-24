@@ -17,7 +17,7 @@ from pathlib import Path
 from . import __version__, refs
 from .features import FeatureContext, ResolvedFeatures, resolve
 from .inputs import BuildInputs, PlanStep
-from .manager import PairingReport, pairing, patch_ksud, pin_driver_version
+from .manager import PairingReport, pairing
 from .packaging import build_anykernel, build_boot_image, write_manifest
 
 AOSP_KERNEL = "https://android.googlesource.com/kernel/common"
@@ -138,16 +138,12 @@ def plan(inputs: BuildInputs) -> Plan:
     )
     steps.append(
         PlanStep(
-            "集成 KernelSU",
-            detail=f"{inputs.pin.repo} @ {inputs.pin.ref[:12]}",
+            "集成 KernelSU（严格按官方文档）",
+            detail=f"{inputs.pin.repo_url} @ {inputs.pin.ref[:12]}",
             actions=[
-                "拷贝 kernel/ 到内核树并写入 Kconfig/Makefile（或执行上游 setup.sh）",
-                f"固定驱动版本号 {inputs.pin.driver_version_code or '（源码自带）'}",
-                *(
-                    ["给 ksud 打 uapi=0 兼容补丁"]
-                    if pair.ksud_patch_needed
-                    else []
-                ),
+                f"官方集成方式：{inputs.pin.docs_flow}",
+                "脚本自行克隆 KernelSU、改写 drivers/Kconfig 与 drivers/Makefile",
+                "不做文档之外的改动：不改驱动版本号、不给 ksud 打补丁",
             ],
         )
     )
@@ -209,7 +205,7 @@ def build(inputs: BuildInputs, out_dir: Path, *, dry_run: bool = False) -> dict:
         "manager": {
             "apk": p.pairing.manager_apk,
             "renamed": False,
-            "ksud_patched": p.pairing.ksud_patch_needed,
+            "device_notes": p.pairing.device_notes,
         },
         "artifacts": [],
     }
@@ -239,33 +235,25 @@ def build(inputs: BuildInputs, out_dir: Path, *, dry_run: bool = False) -> dict:
         else:
             log.warning("没找到子版本 %s 的 tag（%s*），沿用 %s 分支 HEAD", inputs.sub_level, prefix, inputs.line.aosp_branch)
 
-    # 2) KernelSU
-    # 必须克隆到**内核源码树内**的 KernelSU/ 目录：上游 kernel/setup.sh 依赖这个位置，
-    # 且执行时的当前目录要是内核根目录（脚本内部按相对路径改写 Kconfig/Makefile）。
+    # 2) KernelSU —— 严格按钉住版本的官方文档执行：
+    #    「在内核源码的根目录下执行 kernel/setup.sh <分支或提交>」
+    #    脚本自己负责把 KernelSU 克隆进内核树、并改写 drivers/Kconfig 与 Makefile。
+    #    我们不做文档之外的额外改动（不改驱动版本号、不给 ksud 打补丁）。
     ksu = src / "KernelSU"
     if not ksu.exists():
         sh(f"git clone {inputs.pin.repo_url} {ksu}")
         sh(f"git -C {ksu} checkout -q {inputs.pin.ref}")
     setup = (ksu / "kernel" / "setup.sh").resolve()
-    if setup.is_file():
-        sh(f"sh {setup}", cwd=src)  # 在内核根目录执行，且用绝对路径
+    if dry_run:
+        sh(f"sh {setup} {inputs.pin.ref}", cwd=src)  # 干跑只打印命令，不校验源码树
+    elif setup.is_file():
+        sh(f"sh {setup} {inputs.pin.ref}", cwd=src)  # 内核根目录 + 官方参数（提交）
     else:
-        sh(f"cp -a {(ksu / 'kernel').resolve()} {src}/")
-        sh(f"cat {(ksu / 'kernel' / 'Kconfig').resolve()} >> {src}/drivers/Kconfig || true")
-    if not dry_run:
-        # 版本号与 ksud 都在 KSU 源码树里，路径以 ksu 为根
-        version_status = pin_driver_version(ksu, inputs.pin.driver_version_code)
-        manifest["driver_version_pin"] = version_status
-        log.info("驱动版本号: %s", version_status or "未找到宏定义")
-        if inputs.pin.legacy_uapi:
-            status = patch_ksud(ksu)
-            manifest["ksud_patch"] = status
-            log.info("ksud uapi 补丁: %s", status)
-            if status == "not-found":
-                log.warning(
-                    "该版本 ksud 未发现 uapi 版本检查，按“无需补丁”处理；"
-                    "若之后管理器报版本不匹配，再来检查 kbx/manager.py 的目标文件"
-                )
+        raise RuntimeError(
+            f"{inputs.pin.ref} 里没有 kernel/setup.sh，无法按官方文档集成；"
+            "请核对固定表 kbx/refs.py 里的 ref"
+        )
+    manifest["integration"] = "kernel/setup.sh（官方文档「如何添加」一节）"
 
     # 3) 功能
     from .features import feature

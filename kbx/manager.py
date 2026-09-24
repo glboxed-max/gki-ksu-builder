@@ -56,49 +56,54 @@ KSUD_PATCHED = f"""pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {{
 
 @dataclass
 class PairingReport:
-    """构建时打印并写进 manifest，明确管理器怎么配。"""
+    """构建时打印并写进 manifest，明确管理器怎么配、设备上要注意什么。"""
 
     pin: KsuPin
     manager_apk: str
     rename_manager: bool
-    ksud_patch_needed: bool
     steps: list[str] = field(default_factory=list)
+    device_notes: list[str] = field(default_factory=list)
 
     def lines(self) -> list[str]:
-        return [
+        out = [
             f"KSU 版本      : {self.pin.display}（驱动版本号 {self.pin.driver_version_code or '源码自带'}）",
+            f"集成方式      : {self.pin.docs_flow}",
             f"配套管理器    : {self.manager_apk}（**上游原版，不改名、不重签**）",
-            f"ksud uapi 补丁: {'需要（旧版驱动 uapi=0）' if self.ksud_patch_needed else '不需要'}",
             *[f"  · {s}" for s in self.steps],
         ]
+        if self.device_notes:
+            out.append("  设备侧注意事项:")
+            out.extend(f"  · {n}" for n in self.device_notes)
+        return out
 
 
 def pairing(pin: KsuPin) -> PairingReport:
     if refs.MANAGER_RENAME:  # pragma: no cover - 防御性
         raise RuntimeError("本仓库不支持重命名/重签管理器（会触发内核证书白名单死锁）")
-    steps = [
-        "内核侧写入管理器证书白名单 = 上游默认（不注入自定义证书）",
-        f"发布管理器 APK：{pin.manager_apk}",
-    ]
-    if pin.legacy_uapi:
-        steps.append("给 ksud 源码打 uapi=0 兼容补丁，并把编译出的 ksud 作为产物一起发布")
     return PairingReport(
         pin=pin,
         manager_apk=pin.manager_apk,
         rename_manager=False,
-        ksud_patch_needed=pin.legacy_uapi,
-        steps=steps,
+        steps=[
+            "内核侧管理器证书白名单 = 上游默认（不注入自定义证书、不改写驱动版本号）",
+            f"发布管理器 APK：{pin.manager_apk}（与驱动同代）",
+        ],
+        device_notes=[
+            "安装**同一版本**的管理器；若之前装过其它管理器（尤其 LKM 安装模式留下的 ksud），"
+            "先卸载干净再装，否则管理器可能报版本不匹配",
+            "不要重命名 / 重签管理器：内核按证书信任且同一时刻只承认一个管理器 App",
+        ],
     )
 
 
-#: ksud 补丁的几种结果，写进 manifest，构建日志里也能一眼看到
-KSUD_PATCH_RESULTS = {
-    "patched": "已打补丁（原实现里存在 uapi 检查）",
-    "already": "源码里已带该兼容补丁",
-    "not-found": "该版本 ksud 里没有 uapi 检查（无需补丁）",
-}
-
-
+# --------------------------------------------------------------------------- #
+# 以下是"曾经走过弯路"的实现，保留代码但**默认不启用**，仅作排障参考。
+#
+# 背景：实测中发现设备上残留了**更高版本**的 ksud（例如 3.3.0，它带 uapi 检查），
+# 与钉住版本的驱动对不上，于是管理器报版本不匹配。正确的做法是按官方流程重装
+# 匹配版本的管理器（管理器会带上配套的 ksud），而不是在构建期把新版补丁拉回来。
+# 详见 README「我们严格按官方文档做」一节。
+# --------------------------------------------------------------------------- #
 def patch_ksud(src_root: Path) -> str:
     """给 ksud 源码打 uapi 兼容补丁。
 

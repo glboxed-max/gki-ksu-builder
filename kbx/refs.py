@@ -67,9 +67,13 @@ class KsuPin:
     display: str  # 选择器里显示的名字
     driver_version_code: int  # 内核侧驱动版本号（写进源码）
     manager_version_code: int  # 配套管理器 APK 的版本号
-    legacy_uapi: bool = False  # 是否为"旧版驱动"，需要给 ksud 打 uapi 兼容补丁
+    legacy_uapi: bool = False  # 仅为记录：该版本驱动属于早期（uapi 概念前）实现
     susfs_ref: str | None = None  # 与之内核侧同代的 susfs4ksu 提交
     note: str = ""
+    #: 官方文档里给出的集成方式（本仓库严格按它执行，不额外发明步骤）
+    docs_flow: str = (
+        "内核源码根目录执行 kernel/setup.sh <该提交>（官方 docs/README.md「如何添加」一节）"
+    )
 
     @property
     def manager_apk(self) -> str:
