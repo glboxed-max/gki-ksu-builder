@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+build/
+dist/
+out/
+.venv/
+*.egg-info/
+build-manifest.json

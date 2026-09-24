@@ -1,0 +1,18 @@
+[project]
+name = "kbx"
+version = "0.1.0"
+description = "GKI KernelSU / SUSFS 内核自动化构建（SukiSU 钉住版 + 全功能）"
+requires-python = ">=3.10"
+# 刻意不引入任何第三方依赖：整个流水线只用标准库，CI 与本地行为一致。
+dependencies = []
+
+[project.scripts]
+kbx = "kbx.cli:main"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
