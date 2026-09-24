@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -21,6 +22,35 @@ from .packaging import build_anykernel, build_boot_image, write_manifest
 
 AOSP_KERNEL = "https://android.googlesource.com/kernel/common"
 log = logging.getLogger("kbx")
+
+
+def pick_tag(prefix: str, ls_remote: str) -> str | None:
+    """从 `git ls-remote --tags` 输出里挑出子版本对应的 tag。
+
+    纯函数（可单测）：只保留 refs/tags/<prefix>...、排除 peeled 的 `^{}`，
+    后缀里数字最大的优先（例如 ..._r02 > ..._r01）。
+    """
+    names: list[str] = []
+    for raw in ls_remote.splitlines():
+        parts = raw.split("\t")
+        if len(parts) != 2:
+            continue
+        ref = parts[1].strip()
+        if not ref.startswith("refs/tags/"):
+            continue
+        name = ref[len("refs/tags/") :]
+        if name.endswith("^{}") or not name.startswith(prefix):
+            continue
+        names.append(name)
+    if not names:
+        return None
+
+    def sort_key(name: str) -> list[int]:
+        tail = name[len(prefix) :]
+        numbers = [int(x) for x in re.findall(r"\d+", tail)]
+        return numbers or [0]
+
+    return sorted(names, key=sort_key)[-1]
 
 
 @dataclass
@@ -190,18 +220,29 @@ def build(inputs: BuildInputs, out_dir: Path, *, dry_run: bool = False) -> dict:
             return
         subprocess.run(cmd, shell=True, check=True, cwd=cwd)
 
-    # 1) 内核源码
+    def capture(cmd: str) -> str:
+        log.info("$ %s   # 读取输出", cmd)
+        if dry_run:
+            return ""
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        return proc.stdout or ""
+
+    # 1) 内核源码（sub-level -> tag 的解析放 Python 里做，不再用 shell 通配）
     if not src.exists():
         sh(f"git clone --depth 1 -b {inputs.line.aosp_branch} {AOSP_KERNEL} {src}")
     if inputs.sub_level.upper() != "X":
-        tag = f"{inputs.line.aosp_branch}.{inputs.sub_level}"
-        sh(f"git -C {src} fetch --depth 1 origin 'refs/tags/{tag}*' || true")
-        sh(f"git -C {src} checkout -q '$(git -C {src} tag -l \"{tag}*\" | head -n1)' || true")
+        prefix = f"{inputs.line.aosp_branch}.{inputs.sub_level}"
+        tag = pick_tag(prefix, capture(f"git -C {src} ls-remote --tags origin '{prefix}*'"))
+        if tag:
+            sh(f"git -C {src} fetch --depth 1 origin refs/tags/{tag}")
+            sh(f"git -C {src} checkout -q FETCH_HEAD")
+        else:
+            log.warning("没找到子版本 %s 的 tag（%s*），沿用 %s 分支 HEAD", inputs.sub_level, prefix, inputs.line.aosp_branch)
 
     # 2) KernelSU
     ksu = work / "KernelSU"
     if not ksu.exists():
-        sh(f"git clone {inputs.pin.repo} {ksu}")
+        sh(f"git clone {inputs.pin.repo_url} {ksu}")
         sh(f"git -C {ksu} checkout -q {inputs.pin.ref}")
     if (ksu / "kernel" / "setup.sh").is_file():
         sh(f"sh {ksu / 'kernel' / 'setup.sh'}", cwd=src)
@@ -215,13 +256,25 @@ def build(inputs: BuildInputs, out_dir: Path, *, dry_run: bool = False) -> dict:
             manifest["ksud_patched"] = True
 
     # 3) 功能
+    from .features import feature
+
+    reset_fragments()
     ctx = _context(inputs, src, work, offline=dry_run)
     for name in p.features.active:
-        from .features import feature
-
         log.info("== 功能: %s ==", name)
         feature(name).apply(ctx)
     manifest["feature_notes"] = ctx.notes
+
+    # 3.5) 把收集到的 CONFIG_* 真正写进内核配置（否则功能只改了源码、配置没生效）
+    config_lines = fragments()
+    manifest["config_lines"] = len(config_lines)
+    if config_lines and not dry_run:
+        gki = src / "arch" / "arm64" / "configs" / "gki_defconfig"
+        gki.parent.mkdir(parents=True, exist_ok=True)
+        with gki.open("a", encoding="utf-8") as fh:
+            fh.write("\n# kbx: 功能开关\n" + "\n".join(config_lines) + "\n")
+        manifest["config_fragment"] = str(gki.relative_to(src))
+        log.info("已写入 %d 条配置到 %s", len(config_lines), manifest["config_fragment"])
 
     # 4) 编译（GKI）
     if inputs.line.is_612:

@@ -41,6 +41,16 @@ class KsuPinTests(unittest.TestCase):
         with self.assertRaises(refs.RefError):
             refs.ksu_pin("不存在的版本")
 
+    def test_repo_url_is_clonable(self):
+        """回归：曾经直接拿 owner/name 去 clone，CI 报 'repository does not exist'。"""
+        for key, pin in refs.KSU_PINS.items():
+            with self.subTest(pin=key):
+                self.assertTrue(
+                    pin.repo_url.startswith("https://github.com/"),
+                    f"{key} 的 repo_url 不是可 clone 的地址: {pin.repo_url}",
+                )
+                self.assertTrue(pin.repo_url.endswith(pin.repo))
+
 
 class SusfsPinTests(unittest.TestCase):
     def test_same_era_refs_are_hashes(self):

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from kbx.inputs import BuildInputs
-from kbx.pipeline import build, plan
+from kbx.pipeline import build, pick_tag, plan
 
 ALL = (
     "susfs",
@@ -37,6 +37,28 @@ class ValidationTests(unittest.TestCase):
 
     def test_ok(self):
         self.assertEqual(BuildInputs().validate(), [])
+
+
+class PickTagTests(unittest.TestCase):
+    SAMPLE = "\n".join(
+        [
+            "1111111111111111111111111111111111111111\trefs/tags/android14-6.1.138_r00",
+            "2222222222222222222222222222222222222222\trefs/tags/android14-6.1.138_r01",
+            "2222222222222222222222222222222222222222\trefs/tags/android14-6.1.138_r01^{}",
+            "3333333333333333333333333333333333333333\trefs/tags/android14-6.1.139_r00",
+            "4444444444444444444444444444444444444444\trefs/heads/android14-6.1",
+        ]
+    )
+
+    def test_pick_highest_revision(self):
+        self.assertEqual(pick_tag("android14-6.1.138", self.SAMPLE), "android14-6.1.138_r01")
+
+    def test_none_when_missing(self):
+        self.assertIsNone(pick_tag("android16-6.12.999", self.SAMPLE))
+
+    def test_ignores_peeled_and_branches(self):
+        tag = pick_tag("android14-6.1.139", self.SAMPLE)
+        self.assertEqual(tag, "android14-6.1.139_r00")
 
 
 class PlanTests(unittest.TestCase):

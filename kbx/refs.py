@@ -18,6 +18,10 @@ class RefError(RuntimeError):
     """固定表查询失败（未知内核线 / 未知 KSU 版本 / 缺少同代补丁）。"""
 
 
+#: 固定表里的仓库可以用 owner/name 简写，统一在这里补全
+GITHUB = "https://github.com/"
+
+
 # --------------------------------------------------------------------------- #
 # 内核线
 # --------------------------------------------------------------------------- #
@@ -70,6 +74,13 @@ class KsuPin:
     @property
     def manager_apk(self) -> str:
         return f"SukiSU-manager-{self.manager_version_code}.apk"
+
+    @property
+    def repo_url(self) -> str:
+        """可直接交给 git clone 的地址（固定表里写的是 owner/name 简写）。"""
+        if self.repo.startswith(("http://", "https://", "git@")):
+            return self.repo
+        return GITHUB + self.repo
 
 
 KSU_PINS: dict[str, KsuPin] = {
