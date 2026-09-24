@@ -240,19 +240,23 @@ def build(inputs: BuildInputs, out_dir: Path, *, dry_run: bool = False) -> dict:
             log.warning("没找到子版本 %s 的 tag（%s*），沿用 %s 分支 HEAD", inputs.sub_level, prefix, inputs.line.aosp_branch)
 
     # 2) KernelSU
-    ksu = work / "KernelSU"
+    # 必须克隆到**内核源码树内**的 KernelSU/ 目录：上游 kernel/setup.sh 依赖这个位置，
+    # 且执行时的当前目录要是内核根目录（脚本内部按相对路径改写 Kconfig/Makefile）。
+    ksu = src / "KernelSU"
     if not ksu.exists():
         sh(f"git clone {inputs.pin.repo_url} {ksu}")
         sh(f"git -C {ksu} checkout -q {inputs.pin.ref}")
-    if (ksu / "kernel" / "setup.sh").is_file():
-        sh(f"sh {ksu / 'kernel' / 'setup.sh'}", cwd=src)
+    setup = (ksu / "kernel" / "setup.sh").resolve()
+    if setup.is_file():
+        sh(f"sh {setup}", cwd=src)  # 在内核根目录执行，且用绝对路径
     else:
-        sh(f"cp -a {ksu / 'kernel'} {src / 'kernel'}")
-        sh(f"cat {ksu / 'kernel' / 'Kconfig'} >> {src / 'drivers' / 'Kconfig'} || true")
+        sh(f"cp -a {(ksu / 'kernel').resolve()} {src}/")
+        sh(f"cat {(ksu / 'kernel' / 'Kconfig').resolve()} >> {src}/drivers/Kconfig || true")
     if not dry_run:
-        pin_driver_version(src, inputs.pin.driver_version_code)
+        # 版本号与 ksud 都在 KSU 源码树里，路径以 ksu 为根
+        pin_driver_version(ksu, inputs.pin.driver_version_code)
         if inputs.pin.legacy_uapi:
-            patch_ksud(src)
+            patch_ksud(ksu)
             manifest["ksud_patched"] = True
 
     # 3) 功能
